@@ -28,12 +28,15 @@ public class VPNMan {
 
     private static class OVPNServer {
         private final ExecutorService threadpool = Executors.newCachedThreadPool();
-        private String context = UUID.randomUUID().toString();
-        private String staticDir = "static";
-        private int port = 8666;
+        private final String context;
+        private final String staticDir;
+
+        private final String address;
+        private final int port;
         private final OVPNManager manager;
 
-        public OVPNServer(String context, String staticDir, int port, OVPNManager manager) {
+        public OVPNServer(String address, int port, String context, String staticDir, OVPNManager manager) {
+            this.address = address;
             this.context = context;
             this.staticDir = staticDir;
             this.port = port;
@@ -52,7 +55,7 @@ public class VPNMan {
                 if (profile.isPresent()) {
                     try {
                         exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
-                        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"%s\"".formatted(profile.get().name()));
+                        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"%s\"".formatted(profile.get().name()+".ovpn"));
                         exchange.sendResponseHeaders(responseCode, Files.size(Paths.get(profile.get().profile())));
                         Files.copy(Paths.get(profile.get().profile()), exchange.getResponseBody());
                         return;
@@ -97,7 +100,7 @@ public class VPNMan {
                     case "POST" -> {
                         Map<String, Object> request = JsonUtil.fromJSON(exchange.getRequestBody());
                         if (request.containsKey("name")) {
-                            responseCode=201;
+                            responseCode = 201;
                             yield JsonUtil.toJson(manager.createProfile((String) request.get("name")));
                         } else {
                             responseCode = 400;
@@ -151,10 +154,10 @@ public class VPNMan {
                         var mimetype = switch (extensionParts[extensionParts.length - 1]) {
                             case "html" -> "text/html; charset=utf-8";
                             case "json" -> "application/json; charset=utf-8";
-                            case "js" ->"text/javascript; charset=utf-8";
+                            case "js" -> "text/javascript; charset=utf-8";
                             case "css" -> "text/css; charset=utf-8";
                             case "png" -> "image/png";
-                            case "jpeg", "jpg", "jpe" ->"image/jpeg";
+                            case "jpeg", "jpg", "jpe" -> "image/jpeg";
                             case "svg" -> "image/svg+xml";
                             case "ico" -> "image/x-icon";
                             case "gif" -> "image/gif";
@@ -177,7 +180,7 @@ public class VPNMan {
 
         public void start() {
             try {
-                var server = HttpServer.create(new InetSocketAddress("10.10.10.125", port), 0);
+                var server = HttpServer.create(new InetSocketAddress(address, port), 0);
 
                 server.createContext("/" + context + "/profiles", this::profilesContext);
                 server.createContext("/static", this::staticContext);
@@ -192,6 +195,12 @@ public class VPNMan {
 
     private static class OVPNManager {
 
+
+        private static enum EasyRSAAction {
+            create,
+            revoke;
+        }
+
         private static final String DELIMETER = "_-_";
         private static final String EXTENSION = ".ovpn";
 
@@ -201,6 +210,8 @@ public class VPNMan {
         private String easyRSADir = "/etc/openvpn/server/easy-rsa";
         private String template;
         private String outputDir = "/home/crp/ovpn-files";
+
+        private boolean isDryRun = false;
 
         private OVPNManager() {
         }
@@ -218,26 +229,40 @@ public class VPNMan {
             return Optional.of(manager);
         }
 
+        public static Optional<OVPNManager> build(String easyRSADir, String template, String outputDir, boolean isDev) {
+            OVPNManager manager = new OVPNManager();
+            Path easyRSABinary = Paths.get(easyRSADir, "easyrsa");
+            if ((!Files.exists(easyRSABinary) || !Files.isExecutable(easyRSABinary)) && !isDev) {
+                System.out.println("Cannot find executable by path: `%s`. VPN management is not possible".formatted(easyRSABinary.toString()));
+                return Optional.empty();
+            }
+            manager.easyRSADir = easyRSADir;
+            manager.template = template;
+            manager.outputDir = outputDir;
+            manager.isDryRun = isDev;
+            return Optional.of(manager);
+        }
+
         private Optional<VpnProfile> createProfile(String name) {
             var certPath = Paths.get(easyRSADir, "pki", "issued", name + ".crt");
             var keyPath = Paths.get(easyRSADir, "pki", "private", name + ".key");
             if (!Files.exists(certPath) || !Files.exists(keyPath)) {
-                ProcessBuilder pb = new ProcessBuilder("./easyrsa", "build-client-full", name, "nopass");
-                pb.directory(Paths.get(easyRSADir).toFile());
-                try {
-                    Process process = pb.start();
-                    Thread.sleep(200);
-                    process.getOutputStream().write("yes\n".getBytes(UTF_8));
-                    process.getOutputStream().flush();
-                    int exitCode = process.waitFor();
-                    System.out.println("Exit code: " + exitCode);
-                } catch (IOException | InterruptedException e) {
-                    System.out.println(e.getMessage());
+                if (!isDryRun) {
+                    runEasyRSAAction(name, EasyRSAAction.create);
                 }
             }
             try {
-                String cert = Files.readString(certPath, UTF_8);
-                String key = Files.readString(keyPath, UTF_8);
+                String cert = "";
+                String key = "";
+                if (!isDryRun) {
+                    cert = Files.readString(certPath, UTF_8);
+                    key = Files.readString(keyPath, UTF_8);
+
+                } else {
+                    //Random string provides different hashes
+                    cert = UUID.randomUUID().toString();
+                    key = UUID.randomUUID().toString();
+                }
                 String profileContent = this.template.replace("${CERT}", cert).replace("${KEY}", key);
                 String hash = hashString(profileContent);
                 Path profile = getOVPNFile(name, hash).orElseThrow();
@@ -247,6 +272,77 @@ public class VPNMan {
                 System.out.println(e.getMessage());
             }
             return Optional.empty();
+        }
+
+        private void deleteProfile(String name) {
+            var profile = findByName(name);
+            if (profile.isEmpty()) {
+                System.out.println("Could not find profile `%s` to delete.".formatted(name));
+                return;
+            }
+            if (!isDryRun) {
+                int status = runEasyRSAAction(name, EasyRSAAction.revoke);
+            }
+            //TODO process status and check index.txt
+            try {
+                Files.delete(Paths.get(profile.get().profile()));
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
+            }
+        }
+
+        private List<VpnProfile> getProfiles() {
+            try (Stream<Path> list = Files.list(Paths.get(outputDir))) {
+                return list.map(path -> getProfileByPath(path))
+                        .sorted(Comparator.comparing(p -> p.name)).toList();
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
+            }
+            return Collections.emptyList();
+        }
+
+        public void updateProfiles() {
+            try (var list = Files.list(Paths.get(outputDir))) {
+                list.forEach(path -> {
+                    try {
+                        Files.deleteIfExists(path);
+                    } catch (IOException e) {
+                        System.out.println(e.getMessage());
+                    }
+                });
+                try {
+                    Files.readAllLines(Paths.get(easyRSADir, "pki", "index.txt"), UTF_8).stream()
+                            .filter(line -> line.charAt(0) == 'V' && line.contains("/CN="))
+                            .map(line -> line.substring(line.indexOf("/CN=") + 4))
+                            //TODO remove hardcode for server certificate
+                            .filter(name -> !"server".equals(name))
+                            .forEach(name -> createProfile(name));
+                } catch (IOException e) {
+                    System.out.println(e.getMessage());
+                }
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
+            }
+        }
+
+        private int runEasyRSAAction(String name, EasyRSAAction action) {
+            ProcessBuilder pb = switch (action) {
+                case create -> new ProcessBuilder("./easyrsa", "build-client-full", name, "nopass");
+                case revoke -> new ProcessBuilder("./easyrsa", "revoke", name);
+            };
+            pb.directory(Paths.get(easyRSADir).toFile());
+            try {
+                Process process = pb.start();
+                Thread.sleep(200);
+                process.getOutputStream().write("yes\n".getBytes(UTF_8));
+                process.getOutputStream().flush();
+                int exitCode = process.waitFor();
+                System.out.println("Exit code for action: %s, code is %d".formatted(action, exitCode));
+                return exitCode;
+            } catch (IOException | InterruptedException e) {
+                System.out.println(e.getMessage());
+            }
+            return -1;
         }
 
 
@@ -262,7 +358,7 @@ public class VPNMan {
 
         private VpnProfile getProfileByPath(Path path) {
             var parts = path.getFileName().toString().split(DELIMETER);
-            return new VpnProfile(parts[1].substring(0, parts[1].length()-5), path.toAbsolutePath().toString(), parts[0]);
+            return new VpnProfile(parts[1].substring(0, parts[1].length() - 5), path.toAbsolutePath().toString(), parts[0]);
         }
 
         private Optional<VpnProfile> findByNameOrHash(String value, boolean isName) {
@@ -307,64 +403,6 @@ public class VPNMan {
             }
         }
 
-
-        private void deleteProfile(String name) {
-            var profile = findByName(name);
-            if (profile.isEmpty()) {
-                System.out.println("Could not find profile `%s` to delete.".formatted(name));
-                return;
-            }
-            ProcessBuilder pb = new ProcessBuilder("./easyrsa", "revoke", name);
-            pb.directory(Paths.get(easyRSADir).toFile());
-            try {
-                Process process = pb.start();
-                Thread.sleep(200);
-                process.getOutputStream().write("yes\n".getBytes(UTF_8));
-                process.getOutputStream().flush();
-                int exitCode = process.waitFor();
-                System.out.println("Exit code: " + exitCode);
-                Files.delete(Paths.get(profile.get().profile()));
-            } catch (IOException | InterruptedException e) {
-                System.out.println(e.getMessage());
-            }
-        }
-
-
-        private List<VpnProfile> getProfiles() {
-            try (Stream<Path> list = Files.list(Paths.get(outputDir))) {
-                return list.map(path -> getProfileByPath(path))
-                        .sorted(Comparator.comparing(p -> p.name)).toList();
-            } catch (IOException e) {
-                System.out.println(e.getMessage());
-            }
-            return Collections.emptyList();
-        }
-
-        public void updateProfiles() {
-            try (var list = Files.list(Paths.get(outputDir))) {
-                list.forEach(path -> {
-                    try {
-                        Files.deleteIfExists(path);
-                    } catch (IOException e) {
-                        System.out.println(e.getMessage());
-                    }
-                });
-                try {
-                    Files.readAllLines(Paths.get(easyRSADir, "pki", "index.txt"), UTF_8).stream()
-                            .filter(line -> line.charAt(0) == 'V' && line.contains("/CN="))
-                            .map(line -> line.substring(line.indexOf("/CN=")+4))
-                            //TODO remove hardcode for server certificate
-                            .filter(name -> !"server".equals(name))
-                            .forEach(name -> createProfile(name));
-                } catch (IOException e) {
-                    System.out.println(e.getMessage());
-                }
-            } catch (IOException e) {
-                System.out.println(e.getMessage());
-            }
-        }
-
-
     }
 
     public static void main(String[] args) {
@@ -374,19 +412,24 @@ public class VPNMan {
         }
 
         Properties appConfig = parseArguments(args);
-
+        var isDev = false;
 
         if (appConfig.containsKey(PARAM_HELP)) {
             System.out.println(HELP_MESSSAGE);
             return;
         }
-        if(appConfig.containsKey(PARAM_API)){
+        if (appConfig.containsKey(PARAM_API)) {
             System.out.println(API);
             return;
         }
-        if(appConfig.containsKey(PARAM_DEFAULT_TEMPLATE)){
+        if (appConfig.containsKey(PARAM_DEFAULT_TEMPLATE)) {
             System.out.println(defaultTemplate);
             return;
+        }
+
+        if (appConfig.containsKey(PARAM_IS_DEV)) {
+            System.out.println("Development mode: configs will not contain real keys. Easyrsa will not be executed.");
+            isDev = true;
         }
 
         if (appConfig.containsKey(PARAM_CONFIG)) {
@@ -399,6 +442,7 @@ public class VPNMan {
                 return;
             }
         }
+
         if (appConfig.containsKey(PARAM_EASYRSA)) {
             Path easyRSA = Paths.get(appConfig.getProperty(PARAM_EASYRSA));
             if (Files.isDirectory(easyRSA)) {
@@ -452,30 +496,60 @@ public class VPNMan {
         } else {
             System.out.println("--%s parameter is not set. Using command-line parameters instead".formatted(PARAM_TEMPLATE));
             boolean necessaryTemplateParamsPresent = true;
+            String ca = "";
+            String tlsauth = "";
             if (!appConfig.containsKey(PARAM_VPNURL)) {
-                System.out.println("--%s parameter is required in this case".formatted(PARAM_VPNURL));
-                necessaryTemplateParamsPresent = false;
+                if (!isDev) {
+                    System.out.println("--%s parameter is required in this case".formatted(PARAM_VPNURL));
+                    necessaryTemplateParamsPresent = false;
+                } else {
+                    appConfig.put(PARAM_VPNURL, "vpn.sample");
+                }
             }
             if (!appConfig.containsKey(PARAM_VPNPORT)) {
-                System.out.println("--%s parameter is required in this case".formatted(PARAM_VPNPORT));
-                necessaryTemplateParamsPresent = false;
+                if (!isDev) {
+                    System.out.println("--%s parameter is required in this case".formatted(PARAM_VPNPORT));
+                    necessaryTemplateParamsPresent = false;
+                } else {
+                    appConfig.put(PARAM_VPNPORT, "1194");
+                }
             }
             if (!appConfig.containsKey(PARAM_CA)) {
-                System.out.println("--%s parameter is required in this case".formatted(PARAM_CA));
-                necessaryTemplateParamsPresent = false;
+                if (!isDev) {
+                    System.out.println("--%s parameter is required in this case".formatted(PARAM_CA));
+                    necessaryTemplateParamsPresent = false;
+                } else {
+                    ca = "DRY-RUN MODE";
+                }
+
             }
             if (!appConfig.containsKey(PARAM_TLSAUTH)) {
-                System.out.println("--%s parameter is required in this case".formatted(PARAM_TLSAUTH));
-                necessaryTemplateParamsPresent = false;
+                if (!isDev) {
+                    System.out.println("--%s parameter is required in this case".formatted(PARAM_TLSAUTH));
+                    necessaryTemplateParamsPresent = false;
+                } else {
+                    tlsauth = "DRY-RUN MODE";
+                }
             }
             if (!necessaryTemplateParamsPresent) {
                 return;
             }
+            if (!isDev) {
+                try {
+                    ca = Files.readString(Paths.get(appConfig.getProperty(PARAM_CA)));
+                    tlsauth = Files.readString(Paths.get(appConfig.getProperty(PARAM_TLSAUTH)));
+                } catch (IOException e) {
+                    System.out.println("Unable to load CA certificate and TLSAUTH certificate. Reason:\n" + e.getMessage());
+                    return;
+                }
+            }
+
+
             filledTemplate = defaultTemplate
                     .replace("${VPN_SERVER_IP}", appConfig.getProperty(PARAM_VPNURL))
                     .replace("${VPN_SERVER_PORT}", appConfig.getProperty(PARAM_VPNPORT))
-                    .replace("${CA_CERTIFICATE}", appConfig.getProperty(PARAM_CA))
-                    .replace("${TLSAUTH_CERTIFICATE}", appConfig.getProperty(PARAM_TLSAUTH));
+                    .replace("${CA_CERTIFICATE}", ca)
+                    .replace("${TLSAUTH_CERTIFICATE}", tlsauth);
         }
 
         if (!appConfig.containsKey(PARAM_URL)) {
@@ -484,7 +558,7 @@ public class VPNMan {
         }
         if (!appConfig.containsKey(PARAM_PORT)) {
             System.out.println("--%s is not specified. Will use default value".formatted(PARAM_PORT));
-            appConfig.put(PARAM_PORT, DEFAULT_PORT);
+            appConfig.put(PARAM_PORT, DEFAULT_PORT.toString());
         }
         if (!appConfig.containsKey(PARAM_CONTEXT)) {
             var secretContext = UUID.randomUUID().toString();
@@ -506,17 +580,19 @@ public class VPNMan {
         }
         if (!isStaticDirOK) {
             createDirAndSetProperty(PARAM_STATIC, Paths.get(DEFAULT_STATIC), appConfig);
-            downloadDefaultUI(Paths.get(DEFAULT_STATIC));
+            if (isEmpty(Paths.get(DEFAULT_STATIC))) {
+                downloadDefaultUI(Paths.get(DEFAULT_STATIC));
+            }
         }
 
 
-        Optional<OVPNManager> ovpnManager = OVPNManager.build(appConfig.getProperty(PARAM_EASYRSA), filledTemplate, appConfig.getProperty(PARAM_OUTPUT));
+        Optional<OVPNManager> ovpnManager = OVPNManager.build(appConfig.getProperty(PARAM_EASYRSA), filledTemplate, appConfig.getProperty(PARAM_OUTPUT), isDev);
         if (ovpnManager.isEmpty()) {
             System.out.println("Unable to initialize app. Invalid parameters");
             return;
         }
-        OVPNServer ovpnServer = new OVPNServer(appConfig.getProperty(PARAM_CONTEXT), appConfig.getProperty(PARAM_STATIC),
-                Integer.parseInt(appConfig.getProperty(PARAM_PORT)), ovpnManager.get());
+        OVPNServer ovpnServer = new OVPNServer(appConfig.getProperty(PARAM_URL), Integer.parseInt(appConfig.getProperty(PARAM_PORT)),
+                appConfig.getProperty(PARAM_CONTEXT), appConfig.getProperty(PARAM_STATIC), ovpnManager.get());
         System.out.println("Starting open VPN management server on port: " + ovpnServer.port);
         ovpnServer.start();
         System.out.println("Server started");
@@ -524,10 +600,9 @@ public class VPNMan {
 
     private static void downloadDefaultUI(Path to) {
 
-        String url = "https://github.com/tar/vpnman/archive/refs/heads/main.zip";
         String subfolder = "webapp/";
 
-        try (InputStream in = new URI("").toURL().openStream();
+        try (InputStream in = new URI("https://github.com/tar/vpnman/archive/refs/heads/main.zip").toURL().openStream();
              ZipInputStream zipIn = new ZipInputStream(in)) {
             ZipEntry entry;
             while ((entry = zipIn.getNextEntry()) != null) {
@@ -564,7 +639,7 @@ public class VPNMan {
 
     private static void createDirAndSetProperty(String property, Path path, Properties props) {
         try {
-            Files.createDirectory(path);
+            Files.createDirectories(path);
             props.put(property, path.toAbsolutePath().toString());
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -584,10 +659,11 @@ public class VPNMan {
                 argMap.put(PARAM_HELP, "");
             } else {
                 var key = splitArg[0].substring(2);
-                switch (key){
+                switch (key) {
                     case PARAM_HELP -> argMap.put(PARAM_HELP, "");
-                    case PARAM_API ->  argMap.put(PARAM_API, "");
-                    case PARAM_DEFAULT_TEMPLATE ->  argMap.put(PARAM_DEFAULT_TEMPLATE, "");
+                    case PARAM_API -> argMap.put(PARAM_API, "");
+                    case PARAM_DEFAULT_TEMPLATE -> argMap.put(PARAM_DEFAULT_TEMPLATE, "");
+                    case PARAM_IS_DEV -> argMap.put(PARAM_IS_DEV, "");
                 }
             }
         }
@@ -806,6 +882,7 @@ public class VPNMan {
     private static final String PARAM_CONFIG = "config";
     private static final String PARAM_HELP = "help";
     private static final String PARAM_API = "api";
+    private static final String PARAM_IS_DEV = "dry-run";
     private static final String PARAM_DEFAULT_TEMPLATE = "default-template";
     private static final String PARAM_EASYRSA = "easyrsa";
     private static final String PARAM_OUTPUT = "output";
@@ -837,6 +914,7 @@ public class VPNMan {
                 --%s  - prints default client profile
                 --%s            - could be used instead of setting command-line parameters below.
                                       Should be in Java properties format.
+                --%s           - development mode. No actual easyrsa calls performed.
                 
             VPN management parameters:
             |         Parameter           | Optional |                            Description                                  |
@@ -859,7 +937,7 @@ public class VPNMan {
             --------------------------------------------------------------------------------------------------------------------
                 
             For more information please visit https://github.com/tar/vpnman. Thank you for using.
-            """.formatted(PARAM_HELP, PARAM_API, PARAM_DEFAULT_TEMPLATE, PARAM_CONFIG, PARAM_EASYRSA, PARAM_OUTPUT, PATH_CLIENT_PROFILES, PARAM_TEMPLATE, PARAM_VPNURL, PARAM_VPNPORT,
+            """.formatted(PARAM_HELP, PARAM_API, PARAM_DEFAULT_TEMPLATE, PARAM_CONFIG, PARAM_IS_DEV, PARAM_EASYRSA, PARAM_OUTPUT, PATH_CLIENT_PROFILES, PARAM_TEMPLATE, PARAM_VPNURL, PARAM_VPNPORT,
             PARAM_CA, PARAM_TLSAUTH, PARAM_URL, DEFAULT_IP, PARAM_PORT, DEFAULT_PORT, PARAM_CONTEXT, PARAM_STATIC, DEFAULT_STATIC);
 
     private static final String defaultTemplate =
