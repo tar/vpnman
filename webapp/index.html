@@ -1,10 +1,213 @@
 <!DOCTYPE html>
 <html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
-    <title>Title</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>VPN profiles managemet</title>
+
+    <link href="/static/min.css" rel="stylesheet" type="text/css">
+
+    <style>
+		.welcome {
+			background: #eee;
+			padding: 20px;
+			border-radius: 10px;
+			margin-top: 1em;
+		}
+		.welcome h1 {
+			margin-top: 0;
+			margin-bottom: 0.3em;
+		}
+		.right-div {
+            float: right;
+        }
+    </style>
 </head>
 <body>
-    <h1>Hello world!</h1>
+<nav class="nav" tabindex="-1" onclick="this.focus()">
+    <div class="container">
+        <a class="pagename current" href="#">VPNMan</a>
+        <a href="https://github.com/tar/vpnman">GitHub</a>
+        <a href="https://opensource.org/license/mit/">License</a>
+    </div>
+</nav>
+<div class="container">
+    <div class="welcome" id="welcome">
+        <h1>Welcome to VPNMan</h1>
+        <p>To proceed with profiles management enter your secret:</p>
+        <input type="text" class="smooth" id="inputSecret">
+        <button class="btn btn-sm btn-b" onclick="loadData()">Go</button>
+    </div>
+    <div id="profiles" style="visibility:hidden">
+        <div class="row">
+            <div class="col">
+                <input type="text" class="smooth" id="newProfileName">
+                <button class="btn btn-sm btn-b" onclick="createNew()">Create new</button>
+            </div>
+            <div class="col right-div">
+                <button class="btn btn-sm btn-c" onclick="updateAll()">Update all</button>
+            </div>
+        </div>
+        <div class="row" id="profilesContainer">
+
+        </div>
+    </div>
+    <div id="secretError" class="msg" style="display:none">
+        <strong>Access error!</strong>
+        Invalid or empty secret
+    </div>
+</div>
+
+<script>
+
+function createNew(){
+     var name = document.getElementById('newProfileName').value;
+     if(!name){
+        return;
+     }
+    fetch('/'+window.secret+'/profiles', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        "name":name
+      })
+    })
+    .then(response => response.json())
+    .then((data) => {
+        //var table = document.getElementById('tableProfiles');
+        //var row = table.insertRow(-1);
+        //createRow(row, table.rows.length-2, data);
+        loadData();
+    })
+    .catch((error) => {
+      console.error('Error:', error);
+    });
+}
+
+function updateAll(){
+    if(confirm("Are you sure? All client profiles will be removed and recreated from easyrsa index")){
+        fetch('/'+secret+'/profiles', {
+          method: 'PUT'
+        })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Network response was not ok');
+          }
+          loadData();
+        })
+        .catch((error) => {
+          console.error('Error:', error);
+        });
+   }
+}
+
+
+function loadData() {
+  var secret = document.getElementById('inputSecret').value;
+  if(!secret){
+    secret=window.secret;
+    console.log(secret);
+    if(!secret){
+      document.getElementById('secretError').style.display='inline';
+      return;
+    }
+  }
+  window.secret=secret;
+  document.getElementById('secretError').style.display='none';
+  document.getElementById('profiles').style.visibility='visible';
+  fetch('/'+secret+'/profiles')
+    .then(response => response.json())
+    .then(data => {
+      var table = document.getElementById('tableProfiles');
+      if(table){
+        table.remove();
+      }
+      table = createTable();
+      document.getElementById("profilesContainer").appendChild(table);
+      let tbody = document.createElement('tbody');
+      table.appendChild(tbody);
+      data.forEach((item, index) => {
+        var row = tbody.insertRow(-1);
+        createRow(row, index, item);
+      })
+     })
+    .catch((error) => {
+      console.error('Error:', error);
+    });
+}
+
+
+function createTable(){
+      var table = document.createElement('table');
+      table.id="tableProfiles";
+      table.classList.add("table");
+      var header = table.createTHead();
+      var headerRow = header.insertRow(0);
+      var cell = headerRow.insertCell(-1);
+      cell.textContent = "#";
+      cell = headerRow.insertCell(-1);
+      cell.textContent = "Name";
+      cell = headerRow.insertCell(-1);
+      cell.textContent = "Download";
+      cell = headerRow.insertCell(-1);
+      cell.textContent = "Path on server";
+      cell = headerRow.insertCell(-1);
+      cell.textContent = "Revoke";
+      return table;
+}
+
+function createRow(row, index, profile){
+    row.id=profile['name'];
+    var cell = row.insertCell(-1);
+    cell.textContent = index;
+    cell = row.insertCell(-1);
+    cell.textContent = profile['name'];
+    cell = row.insertCell(-1);
+
+    var downloadLink = document.createElement('a');
+    downloadLink.textContent = "Download";
+    downloadLink.setAttribute('href', '/direct/'+profile['hash']);
+    downloadLink.classList.add("btn");
+    downloadLink.classList.add("btn-sm");
+    downloadLink.classList.add("btn-b");
+    cell.appendChild(downloadLink);
+    cell = row.insertCell(-1);
+    if(profile['profile'].length<97){
+        cell.textContent = profile['profile'];
+    } else {
+        cell.textContent = profile['profile'].slice(0, 93)+"...";
+    }
+    cell = row.insertCell(-1);
+    var revokeBtn = document.createElement('button');
+    revokeBtn.textContent = "Revoke";
+    revokeBtn.classList.add("btn");
+    revokeBtn.classList.add("btn-sm");
+    revokeBtn.classList.add("btn-c");
+    //revokeBtn.style.margin="20px";
+    revokeBtn.addEventListener('click', (e) => {
+        if(confirm("Are you sure? Profile '"+profile['name']+"' will be deleted permanently.")){
+            fetch('/'+secret+'/profiles/'+profile['name'], {
+              method: 'DELETE'
+            })
+            .then((response) => {
+              if (!response.ok) {
+                throw new Error('Network response was not ok');
+              }
+              document.getElementById(profile['name']).remove();
+            })
+            .catch((error) => {
+              console.error('Error:', error);
+            });
+       }
+    });
+    cell.appendChild(revokeBtn);
+}
+
+</script>
+
 </body>
 </html>

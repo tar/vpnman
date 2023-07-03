@@ -101,7 +101,7 @@ public class VPNMan {
                         Map<String, Object> request = JsonUtil.fromJSON(exchange.getRequestBody());
                         if (request.containsKey("name")) {
                             responseCode = 201;
-                            yield JsonUtil.toJson(manager.createProfile((String) request.get("name")));
+                            yield JsonUtil.toJson(manager.createProfile((String) request.get("name")).get());
                         } else {
                             responseCode = 400;
                             yield "No name provided";
@@ -146,7 +146,6 @@ public class VPNMan {
                     System.err.println(e.getMessage());
                 }
             } else {
-                System.out.println(exchange.getRequestURI().getPath());
                 var path = Paths.get(staticDir, exchange.getRequestURI().getPath().replaceFirst("/static/", ""));
                 var extensionParts = path.getFileName().toString().split("\\.");
                 try (OutputStream outputStream = exchange.getResponseBody()) {
