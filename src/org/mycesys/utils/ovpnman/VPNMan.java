@@ -584,7 +584,6 @@ public class VPNMan {
             }
         }
 
-
         Optional<OVPNManager> ovpnManager = OVPNManager.build(appConfig.getProperty(PARAM_EASYRSA), filledTemplate, appConfig.getProperty(PARAM_OUTPUT), isDev);
         if (ovpnManager.isEmpty()) {
             System.out.println("Unable to initialize app. Invalid parameters");
@@ -600,12 +599,11 @@ public class VPNMan {
     private static void downloadDefaultUI(Path to) {
 
         String subfolder = "webapp/";
-
         try (InputStream in = new URI("https://github.com/tar/vpnman/archive/refs/heads/main.zip").toURL().openStream();
              ZipInputStream zipIn = new ZipInputStream(in)) {
             ZipEntry entry;
             while ((entry = zipIn.getNextEntry()) != null) {
-                if (!entry.isDirectory() && entry.getName().startsWith(subfolder)) {
+                if (!entry.isDirectory() && entry.getName().substring(12).startsWith(subfolder)) {
                     Path targetPath = to.resolve(Paths.get(entry.getName()).getFileName());
                     Files.createDirectories(targetPath.getParent());
                     Files.copy(zipIn, targetPath, StandardCopyOption.REPLACE_EXISTING);
@@ -615,9 +613,7 @@ public class VPNMan {
         } catch (IOException | URISyntaxException e) {
             System.out.println("Unable to download default webapp content. Reason\n" + e.getMessage());
         }
-
     }
-
 
     private static boolean isEmpty(Path path) {
         if (Files.isDirectory(path)) {
@@ -705,7 +701,6 @@ public class VPNMan {
             }
             return jsonElements.toString();
         }
-
 
         private static int read(Reader reader) {
             try {
