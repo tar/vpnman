@@ -55,7 +55,7 @@ public class VPNMan {
                 if (profile.isPresent()) {
                     try {
                         exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
-                        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"%s\"".formatted(profile.get().name()+".ovpn"));
+                        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"%s\"".formatted(profile.get().name() + ".ovpn"));
                         exchange.sendResponseHeaders(responseCode, Files.size(Paths.get(profile.get().profile())));
                         Files.copy(Paths.get(profile.get().profile()), exchange.getResponseBody());
                         return;
@@ -177,10 +177,37 @@ public class VPNMan {
             }
         }
 
+        private void rootContext(HttpExchange exchange) {
+            if (!exchange.getRequestMethod().equals("GET")) {
+                var responseData = "Only GET method supported";
+                try (OutputStream outputStream = exchange.getResponseBody()) {
+                    exchange.sendResponseHeaders(405, responseData.length());
+                    outputStream.write(responseData.getBytes());
+                    outputStream.flush();
+                } catch (IOException e) {
+                    System.err.println(e.getMessage());
+                }
+            } else {
+                var path = Paths.get(staticDir, "index.html");
+                var extensionParts = path.getFileName().toString().split("\\.");
+                try (OutputStream outputStream = exchange.getResponseBody()) {
+                    if (Files.exists(path)) {
+                        exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                        exchange.sendResponseHeaders(200, Files.size(path));
+                        Files.copy(path, outputStream);
+                    } else {
+                        exchange.sendResponseHeaders(404, -1);
+                    }
+                } catch (IOException e) {
+                    System.err.println(e.getMessage());
+                }
+            }
+        }
+
         public void start() {
             try {
                 var server = HttpServer.create(new InetSocketAddress(address, port), 0);
-
+                server.createContext("/", this::rootContext);
                 server.createContext("/" + context + "/profiles", this::profilesContext);
                 server.createContext("/static", this::staticContext);
                 server.createContext("/direct", this::directContext);
