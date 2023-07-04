@@ -37,13 +37,13 @@
     <div class="welcome" id="welcome">
         <h1>Welcome to VPNMan</h1>
         <p>To proceed with profiles management enter your secret:</p>
-        <input type="text" class="smooth" id="inputSecret">
+        <input type="text" class="smooth" id="inputSecret"  placeholder="enter secret">
         <button class="btn btn-sm btn-b" onclick="loadData()">Go</button>
     </div>
     <div id="profiles" style="visibility:hidden">
         <div class="row">
             <div class="col">
-                <input type="text" class="smooth" id="newProfileName">
+                <input type="text" class="smooth" id="newProfileName"  placeholder="enter new profile name">
                 <button class="btn btn-sm btn-b" onclick="createNew()">Create new</button>
             </div>
             <div class="col right-div">
@@ -81,6 +81,7 @@ function createNew(){
         //var table = document.getElementById('tableProfiles');
         //var row = table.insertRow(-1);
         //createRow(row, table.rows.length-2, data);
+        document.getElementById('newProfileName').value='';
         loadData();
     })
     .catch((error) => {

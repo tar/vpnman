@@ -43,7 +43,6 @@ public class VPNMan {
             this.manager = manager;
         }
 
-
         private void directContext(HttpExchange exchange) {
             String responseData;
             int responseCode = 200;
@@ -72,8 +71,6 @@ public class VPNMan {
                 responseCode = 405;
                 responseData = "Only GET method supported";
             }
-
-
             exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
             try (OutputStream outputStream = exchange.getResponseBody()) {
                 exchange.sendResponseHeaders(responseCode, responseData.length());
@@ -213,6 +210,8 @@ public class VPNMan {
                 server.createContext("/direct", this::directContext);
                 server.setExecutor(threadpool);
                 server.start();
+                System.out.println("Server started on: http://%s:%s/".formatted(address, String.valueOf(port)));
+                System.out.println("Secret context:%s".formatted(context));
             } catch (IOException e) {
                 System.err.println(e.getMessage());
             }
@@ -588,12 +587,20 @@ public class VPNMan {
         }
         if (!appConfig.containsKey(PARAM_CONTEXT)) {
             var secretContext = UUID.randomUUID().toString();
-            System.out.println("--%s is not specified. Secret context:%s".formatted(PARAM_CONTEXT, secretContext));
+            System.out.println("--%s is not specified. Will use generated one.".formatted(PARAM_CONTEXT));
             appConfig.put(PARAM_CONTEXT, secretContext);
         }
+        //TODO save secret context to a file
         boolean isStaticDirOK = true;
         if (appConfig.containsKey(PARAM_STATIC)) {
             Path staticDir = Paths.get(appConfig.getProperty(PARAM_STATIC));
+            if(!Files.exists(staticDir)){
+                try {
+                    Files.createDirectories(staticDir);
+                } catch (IOException e) {
+                    System.out.println(e.getMessage());
+                }
+            }
             if (!Files.isDirectory(staticDir)) {
                 System.out.println("Path for static content `%s` is not directory. Will use default value".formatted(staticDir.toString()));
                 isStaticDirOK = false;
@@ -618,9 +625,8 @@ public class VPNMan {
         }
         OVPNServer ovpnServer = new OVPNServer(appConfig.getProperty(PARAM_URL), Integer.parseInt(appConfig.getProperty(PARAM_PORT)),
                 appConfig.getProperty(PARAM_CONTEXT), appConfig.getProperty(PARAM_STATIC), ovpnManager.get());
-        System.out.println("Starting open VPN management server on port: " + ovpnServer.port);
         ovpnServer.start();
-        System.out.println("Server started");
+        System.out.println();
     }
 
     private static void downloadDefaultUI(Path to) {
@@ -1008,6 +1014,16 @@ public class VPNMan {
                 name: MIT License
                 url: 'https://opensource.org/license/mit/'
             paths:
+              /:
+                get:
+                  summary: return index.html
+                  operationId: indexHTML
+                  description: 'returns index.html if present'
+                  responses:
+                    '200':
+                      description: index.html found
+                    '404':
+                      description: index.html not found
               /${secret}/profiles:
                 parameters:
                   - name: secret
